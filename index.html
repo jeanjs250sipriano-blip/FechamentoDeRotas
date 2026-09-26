@@ -62,6 +62,79 @@ const MESES=["JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO","JULHO","AGOS
 let appData={version:1,fechamentos:[]};
 let currentFechId=null;
 
+// ---------- navegação / botão voltar do celular ----------
+// 100% local: nenhuma requisição de rede é feita neste app.
+let allowExit=false;
+let currentScreenState={screen:"home"};
+let deferredInstallPrompt=null;
+
+function generateIcon(size){
+  const c=document.createElement("canvas");c.width=size;c.height=size;
+  const ctx=c.getContext("2d");
+  ctx.fillStyle="#2563eb";ctx.fillRect(0,0,size,size);
+  ctx.font=(size*0.6)+"px sans-serif";
+  ctx.textAlign="center";ctx.textBaseline="middle";
+  ctx.fillText("📦",size/2,size/2+size*0.05);
+  return c.toDataURL("image/png");
+}
+function setupPWA(){
+  const icon192=generateIcon(192),icon512=generateIcon(512);
+  const manifest={name:"Controle de Entregas",short_name:"Entregas",start_url:".",display:"standalone",
+    background_color:"#f4f5f7",theme_color:"#2563eb",
+    icons:[{src:icon192,sizes:"192x192",type:"image/png"},{src:icon512,sizes:"512x512",type:"image/png"}]};
+  const url=URL.createObjectURL(new Blob([JSON.stringify(manifest)],{type:"application/json"}));
+  const link=document.createElement("link");link.rel="manifest";link.href=url;document.head.appendChild(link);
+  const appleIcon=document.createElement("link");appleIcon.rel="apple-touch-icon";appleIcon.href=icon192;document.head.appendChild(appleIcon);
+  const theme=document.createElement("meta");theme.name="theme-color";theme.content="#2563eb";document.head.appendChild(theme);
+}
+window.addEventListener("beforeinstallprompt",e=>{e.preventDefault();deferredInstallPrompt=e;});
+function instalarApp(){
+  if(deferredInstallPrompt){
+    deferredInstallPrompt.prompt();
+    deferredInstallPrompt.userChoice.finally(()=>{deferredInstallPrompt=null;});
+  }else{
+    alert("Para instalar o aplicativo:\n\nAndroid/Chrome: toque no menu (⋮) e escolha \"Instalar aplicativo\" ou \"Adicionar à tela inicial\".\n\niPhone/Safari: toque em Compartilhar e escolha \"Adicionar à Tela de Início\".");
+  }
+}
+
+function initHistory(){history.replaceState({screen:"home"},"");}
+function pushAppState(state){currentScreenState=state;history.pushState(state,"");}
+
+window.addEventListener("popstate",function(e){
+  if(document.getElementById("modalRoot").innerHTML.trim()!==""){
+    closeModal();
+    history.pushState(currentScreenState,"");
+    return;
+  }
+  const state=e.state;
+  if(state&&state.screen==="fechamento"){
+    currentFechId=state.id;currentScreenState=state;renderFechamento();
+  }else if(state&&state.screen==="home"){
+    currentScreenState=state;renderHome();
+  }else{
+    if(allowExit){allowExit=false;return;}
+    history.pushState({screen:"home"},"");
+    currentScreenState={screen:"home"};
+    showExitConfirm();
+  }
+});
+function showExitConfirm(){
+  const modal=`<div class="modal-bg"><div class="modal">
+    <h3>Sair?</h3>
+    <div class="row">
+      <button class="btn-sec" onclick="closeModal()">CANCELAR</button>
+      <button class="btn-danger" onclick="confirmarSaida()">SAIR</button>
+    </div>
+  </div></div>`;
+  document.getElementById("modalRoot").innerHTML=modal;
+}
+function confirmarSaida(){
+  allowExit=true;
+  closeModal();
+  history.back();
+  history.back();
+}
+
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,8);}
 function pad(n){return n.toString().padStart(2,"0");}
 function fmtDate(iso){const[y,m,d]=iso.split("-");return `${d}/${m}/${y}`;}
@@ -154,13 +227,13 @@ function criarFechamento(){
 }
 
 // ---------- render fechamento ----------
-function openFechamento(id){currentFechId=id;renderFechamento();}
+function openFechamento(id){currentFechId=id;pushAppState({screen:"fechamento",id:id});renderFechamento();}
 function getFech(){return appData.fechamentos.find(f=>f.id===currentFechId);}
 
 function renderFechamento(){
   const f=getFech();if(!f){renderHome();return;}
   const app=document.getElementById("app");
-  let html=`<button class="backbtn" onclick="renderHome()">← Voltar</button>
+  let html=`<button class="backbtn" onclick="history.back()">← Voltar</button>
     <div class="card" style="cursor:default">
       <h3>${f.nome}</h3>
       <div class="per">${fmtDate(f.inicio)} → ${fmtDate(f.fim)}</div>
@@ -284,6 +357,7 @@ function openSettings(){
     <div class="modal">
       <h3>Configurações</h3>
       <div class="settlist">
+        <button onclick="instalarApp()">📲 Instalar Aplicativo</button>
         <button onclick="exportarBackup()">💾 Exportar Backup</button>
         <button onclick="document.getElementById('fileInput').click()">📥 Restaurar Backup</button>
         <button onclick="gerenciarFechamentos()">🗂️ Gerenciar Fechamentos</button>
@@ -402,7 +476,7 @@ function mesclarBackup(){
 }
 
 // ---------- init ----------
-load();renderHome();
+load();initHistory();setupPWA();renderHome();
 </script>
 </body>
 </html>
