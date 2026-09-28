@@ -43,11 +43,27 @@ body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:va
 .hidden{display:none}
 .settlist button{display:block;width:100%;text-align:left;padding:12px;margin-bottom:8px;border-radius:10px;border:none;background:#f1f3f5;font-size:15px;cursor:pointer}
 .fileinput{margin:10px 0}
+/* Auth screens */
+.auth-wrap{max-width:360px;margin:40px auto;padding:0 16px}
+.auth-card{background:var(--card);border-radius:14px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.auth-card h2{margin:0 0 6px;font-size:20px;text-align:center}
+.auth-card .sub{color:var(--muted);font-size:13px;text-align:center;margin-bottom:18px}
+.auth-card label{display:block;font-size:13px;color:var(--muted);margin-top:10px}
+.auth-card input{width:100%;padding:12px;font-size:18px;border:1px solid var(--bord);border-radius:8px;margin-top:4px}
+.auth-card .btn-full{width:100%;padding:14px;border:none;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer;margin-top:16px}
+.auth-card .linkbtn{display:block;width:100%;background:none;border:none;color:var(--pri);font-size:14px;margin-top:12px;cursor:pointer;text-align:center}
+.auth-err{color:#dc2626;font-size:13px;margin-top:8px;text-align:center;min-height:18px}
+.auth-ok{color:#059669;font-size:13px;margin-top:8px;text-align:center}
+.sync-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.sync-dot.ok{background:#22c55e}
+.sync-dot.off{background:#9ca3af}
+.sync-dot.err{background:#ef4444}
+.loading-center{text-align:center;padding:60px 20px;color:var(--muted)}
 </style>
 </head>
 <body>
 
-<div class="topbar">
+<div class="topbar" id="topbar" style="display:none">
   <h1 id="topTitle">CONTROLE DE ENTREGAS</h1>
   <button class="gear" onclick="openSettings()">⚙️</button>
 </div>
@@ -56,226 +72,627 @@ body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:va
 <div id="modalRoot"></div>
 <input type="file" id="fileInput" accept="application/json" style="display:none" onchange="handleFile(event)">
 
-<script>
-const DIAS_SEMANA=["DOMINGO","SEGUNDA-FEIRA","TERÇA-FEIRA","QUARTA-FEIRA","QUINTA-FEIRA","SEXTA-FEIRA","SÁBADO"];
-const MESES=["JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO","JULHO","AGOSTO","SETEMBRO","OUTUBRO","NOVEMBRO","DEZEMBRO"];
-let appData={version:1,fechamentos:[]};
-let currentFechId=null;
+<script type="module">
+// ============================================================
+// FIREBASE CONFIG — cole aqui as credenciais do Firebase Console
+// Projeto: fechamento-entrega
+// ============================================================
+const firebaseConfig = {
+  apiKey: "AIzaSyCOcsBOzdmWaf99_ylbAEJhX4Ou2V08xgY",
+  authDomain: "fechamento-entrega.firebaseapp.com",
+  projectId: "fechamento-entrega",
+  storageBucket: "fechamento-entrega.firebasestorage.app",
+  messagingSenderId: "654614493754",
+  appId: "1:654614493754:web:3c1f05528c5229fcf41303"
+};
 
-// ---------- navegação / botão voltar do celular ----------
-// 100% local: nenhuma requisição de rede é feita neste app.
-let allowExit=false;
-let currentScreenState={screen:"home"};
-let deferredInstallPrompt=null;
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import {
+  getAuth, setPersistence, browserLocalPersistence,
+  createUserWithEmailAndPassword, signInWithEmailAndPassword,
+  signOut, onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import {
+  getFirestore, enableIndexedDbPersistence,
+  collection, doc, setDoc, getDoc, getDocs, deleteDoc,
+  onSnapshot, writeBatch
+} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
-function generateIcon(size){
-  const c=document.createElement("canvas");c.width=size;c.height=size;
-  const ctx=c.getContext("2d");
-  ctx.fillStyle="#2563eb";ctx.fillRect(0,0,size,size);
-  ctx.font=(size*0.6)+"px sans-serif";
-  ctx.textAlign="center";ctx.textBaseline="middle";
-  ctx.fillText("📦",size/2,size/2+size*0.05);
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+
+// Persistência offline do Firestore (melhor esforço)
+enableIndexedDbPersistence(db).catch(err => {
+  if (err.code === "failed-precondition") {
+    console.warn("Persistência offline: múltiplas abas abertas.");
+  } else if (err.code === "unimplemented") {
+    console.warn("Persistência offline não suportada neste navegador.");
+  }
+});
+
+setPersistence(auth, browserLocalPersistence).catch(e => console.warn("Auth persistence:", e));
+
+// ============================================================
+// MODELO DE DADOS (preservado)
+// appData = { version:1, fechamentos:[ { id, mesInicial, anoInicial, inicio, fim, nome, dias:[ { data, domingoBloqueado, rotas:[ {id, entregas} ] } ] } ] }
+// Firestore: users/{uid}/fechamentos/{fechId}  → documento com o fechamento completo
+// ============================================================
+const DIAS_SEMANA = ["DOMINGO","SEGUNDA-FEIRA","TERÇA-FEIRA","QUARTA-FEIRA","QUINTA-FEIRA","SEXTA-FEIRA","SÁBADO"];
+const MESES = ["JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO","JULHO","AGOSTO","SETEMBRO","OUTUBRO","NOVEMBRO","DEZEMBRO"];
+
+let appData = { version: 1, fechamentos: [] };
+let currentFechId = null;
+let currentUser = null;
+let unsubscribeFechamentos = null;
+let syncStatus = "ok"; // ok | off | err
+let migrationDoneKey = null; // localStorage key per uid
+
+// ---------- navegação / botão voltar ----------
+let allowExit = false;
+let currentScreenState = { screen: "home" };
+let deferredInstallPrompt = null;
+
+function generateIcon(size) {
+  const c = document.createElement("canvas"); c.width = size; c.height = size;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#2563eb"; ctx.fillRect(0, 0, size, size);
+  ctx.font = (size * 0.6) + "px sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("📦", size / 2, size / 2 + size * 0.05);
   return c.toDataURL("image/png");
 }
-function setupPWA(){
-  const icon192=generateIcon(192),icon512=generateIcon(512);
-  const manifest={name:"Controle de Entregas",short_name:"Entregas",start_url:".",display:"standalone",
-    background_color:"#f4f5f7",theme_color:"#2563eb",
-    icons:[{src:icon192,sizes:"192x192",type:"image/png"},{src:icon512,sizes:"512x512",type:"image/png"}]};
-  const url=URL.createObjectURL(new Blob([JSON.stringify(manifest)],{type:"application/json"}));
-  const link=document.createElement("link");link.rel="manifest";link.href=url;document.head.appendChild(link);
-  const appleIcon=document.createElement("link");appleIcon.rel="apple-touch-icon";appleIcon.href=icon192;document.head.appendChild(appleIcon);
-  const theme=document.createElement("meta");theme.name="theme-color";theme.content="#2563eb";document.head.appendChild(theme);
+function setupPWA() {
+  const icon192 = generateIcon(192), icon512 = generateIcon(512);
+  const manifest = {
+    name: "Controle de Entregas", short_name: "Entregas", start_url: ".", display: "standalone",
+    background_color: "#f4f5f7", theme_color: "#2563eb",
+    icons: [{ src: icon192, sizes: "192x192", type: "image/png" }, { src: icon512, sizes: "512x512", type: "image/png" }]
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: "application/json" }));
+  const link = document.createElement("link"); link.rel = "manifest"; link.href = url; document.head.appendChild(link);
+  const appleIcon = document.createElement("link"); appleIcon.rel = "apple-touch-icon"; appleIcon.href = icon192; document.head.appendChild(appleIcon);
+  const theme = document.createElement("meta"); theme.name = "theme-color"; theme.content = "#2563eb"; document.head.appendChild(theme);
 }
-window.addEventListener("beforeinstallprompt",e=>{e.preventDefault();deferredInstallPrompt=e;});
-function instalarApp(){
-  if(deferredInstallPrompt){
+window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferredInstallPrompt = e; });
+function instalarApp() {
+  if (deferredInstallPrompt) {
     deferredInstallPrompt.prompt();
-    deferredInstallPrompt.userChoice.finally(()=>{deferredInstallPrompt=null;});
-  }else{
+    deferredInstallPrompt.userChoice.finally(() => { deferredInstallPrompt = null; });
+  } else {
     alert("Para instalar o aplicativo:\n\nAndroid/Chrome: toque no menu (⋮) e escolha \"Instalar aplicativo\" ou \"Adicionar à tela inicial\".\n\niPhone/Safari: toque em Compartilhar e escolha \"Adicionar à Tela de Início\".");
   }
 }
 
-function initHistory(){history.replaceState({screen:"home"},"");}
-function pushAppState(state){currentScreenState=state;history.pushState(state,"");}
+function initHistory() { history.replaceState({ screen: "home" }, ""); }
+function pushAppState(state) { currentScreenState = state; history.pushState(state, ""); }
 
-window.addEventListener("popstate",function(e){
-  if(document.getElementById("modalRoot").innerHTML.trim()!==""){
+window.addEventListener("popstate", function (e) {
+  if (document.getElementById("modalRoot").innerHTML.trim() !== "") {
     closeModal();
-    history.pushState(currentScreenState,"");
+    history.pushState(currentScreenState, "");
     return;
   }
-  const state=e.state;
-  if(state&&state.screen==="fechamento"){
-    currentFechId=state.id;currentScreenState=state;renderFechamento();
-  }else if(state&&state.screen==="home"){
-    currentScreenState=state;renderHome();
-  }else{
-    if(allowExit){allowExit=false;return;}
-    history.pushState({screen:"home"},"");
-    currentScreenState={screen:"home"};
+  if (!currentUser) return;
+  const state = e.state;
+  if (state && state.screen === "fechamento") {
+    currentFechId = state.id; currentScreenState = state; renderFechamento();
+  } else if (state && state.screen === "home") {
+    currentScreenState = state; renderHome();
+  } else {
+    if (allowExit) { allowExit = false; return; }
+    history.pushState({ screen: "home" }, "");
+    currentScreenState = { screen: "home" };
     showExitConfirm();
   }
 });
-function showExitConfirm(){
-  const modal=`<div class="modal-bg"><div class="modal">
+function showExitConfirm() {
+  const modal = `<div class="modal-bg"><div class="modal">
     <h3>Sair?</h3>
     <div class="row">
       <button class="btn-sec" onclick="closeModal()">CANCELAR</button>
       <button class="btn-danger" onclick="confirmarSaida()">SAIR</button>
     </div>
   </div></div>`;
-  document.getElementById("modalRoot").innerHTML=modal;
+  document.getElementById("modalRoot").innerHTML = modal;
 }
-function confirmarSaida(){
-  allowExit=true;
+function confirmarSaida() {
+  allowExit = true;
   closeModal();
   history.back();
   history.back();
 }
 
-function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,8);}
-function pad(n){return n.toString().padStart(2,"0");}
-function fmtDate(iso){const[y,m,d]=iso.split("-");return `${d}/${m}/${y}`;}
-function fmtDateShort(iso){const[y,m,d]=iso.split("-");return `${d}/${m}`;}
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+function pad(n) { return n.toString().padStart(2, "0"); }
+function fmtDate(iso) { const [y, m, d] = iso.split("-"); return `${d}/${m}/${y}`; }
+function fmtDateShort(iso) { const [y, m, d] = iso.split("-"); return `${d}/${m}`; }
 
-function load(){
-  try{const raw=localStorage.getItem("controleEntregasData");if(raw)appData=JSON.parse(raw);}catch(e){}
+// ---------- localStorage (cópia local por usuário) ----------
+function localKey() {
+  return currentUser ? `controleEntregasData_${currentUser.uid}` : "controleEntregasData";
 }
-function save(){
-  try{localStorage.setItem("controleEntregasData",JSON.stringify(appData));}
-  catch(e){alert("Não foi possível salvar os dados. O armazenamento pode estar cheio ou indisponível.");}
+function loadLocal() {
+  try {
+    const raw = localStorage.getItem(localKey());
+    if (raw) appData = JSON.parse(raw);
+    else appData = { version: 1, fechamentos: [] };
+  } catch (e) {
+    appData = { version: 1, fechamentos: [] };
+  }
+}
+function saveLocal() {
+  try {
+    localStorage.setItem(localKey(), JSON.stringify(appData));
+  } catch (e) {
+    alert("Não foi possível salvar os dados. O armazenamento pode estar cheio ou indisponível.");
+  }
+}
+
+// Dados legados (versão anterior sem Firebase)
+function loadLegacyLocal() {
+  try {
+    const raw = localStorage.getItem("controleEntregasData");
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (data && Array.isArray(data.fechamentos) && data.fechamentos.length > 0) return data;
+  } catch (e) {}
+  return null;
 }
 
 // ---------- geração de datas ----------
-function daysBetween(startIso,endIso){
-  const res=[];let d=new Date(startIso+"T00:00:00");const end=new Date(endIso+"T00:00:00");
-  while(d<=end){
-    const iso=`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-    res.push(iso);d.setDate(d.getDate()+1);
+function daysBetween(startIso, endIso) {
+  const res = []; let d = new Date(startIso + "T00:00:00"); const end = new Date(endIso + "T00:00:00");
+  while (d <= end) {
+    const iso = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    res.push(iso); d.setDate(d.getDate() + 1);
   }
   return res;
 }
-function weekdayOf(iso){const d=new Date(iso+"T00:00:00");return DIAS_SEMANA[d.getDay()];}
-function isSaturday(iso){return new Date(iso+"T00:00:00").getDay()===6;}
-function isSunday(iso){return new Date(iso+"T00:00:00").getDay()===0;}
+function weekdayOf(iso) { const d = new Date(iso + "T00:00:00"); return DIAS_SEMANA[d.getDay()]; }
+function isSaturday(iso) { return new Date(iso + "T00:00:00").getDay() === 6; }
+function isSunday(iso) { return new Date(iso + "T00:00:00").getDay() === 0; }
 
-function computePeriodo(mesInicial,anoInicial){
-  const inicio=`${anoInicial}-${pad(mesInicial)}-26`;
-  let m2=mesInicial+1,a2=anoInicial;if(m2>12){m2=1;a2++;}
-  const fim=`${a2}-${pad(m2)}-25`;
-  const nome=`${MESES[mesInicial-1]} / ${MESES[m2-1]} ${a2}`;
-  return{inicio,fim,nome};
+function computePeriodo(mesInicial, anoInicial) {
+  const inicio = `${anoInicial}-${pad(mesInicial)}-26`;
+  let m2 = mesInicial + 1, a2 = anoInicial; if (m2 > 12) { m2 = 1; a2++; }
+  const fim = `${a2}-${pad(m2)}-25`;
+  const nome = `${MESES[mesInicial - 1]} / ${MESES[m2 - 1]} ${a2}`;
+  return { inicio, fim, nome };
 }
 
 // ---------- totais ----------
-function totalDia(dia){return dia.rotas.reduce((s,r)=>s+r.entregas,0);}
-function totalRotasFechamento(f){return f.dias.reduce((s,d)=>s+d.rotas.length,0);}
-function totalEntregasFechamento(f){return f.dias.reduce((s,d)=>s+totalDia(d),0);}
+function totalDia(dia) { return dia.rotas.reduce((s, r) => s + r.entregas, 0); }
+function totalRotasFechamento(f) { return f.dias.reduce((s, d) => s + d.rotas.length, 0); }
+function totalEntregasFechamento(f) { return f.dias.reduce((s, d) => s + totalDia(d), 0); }
+
+// ============================================================
+// FIRESTORE: sync
+// Estrutura: users/{uid}/fechamentos/{fechId}
+// Documento = fechamento completo (id, nome, inicio, fim, dias[], ...)
+// ============================================================
+function fechColRef() {
+  return collection(db, "users", currentUser.uid, "fechamentos");
+}
+function fechDocRef(fechId) {
+  return doc(db, "users", currentUser.uid, "fechamentos", fechId);
+}
+
+async function syncFechamentoToCloud(fech) {
+  if (!currentUser) return;
+  try {
+    await setDoc(fechDocRef(fech.id), {
+      id: fech.id,
+      mesInicial: fech.mesInicial,
+      anoInicial: fech.anoInicial,
+      inicio: fech.inicio,
+      fim: fech.fim,
+      nome: fech.nome,
+      dias: fech.dias,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+    syncStatus = "ok";
+  } catch (e) {
+    console.warn("syncFechamentoToCloud:", e);
+    syncStatus = navigator.onLine ? "err" : "off";
+  }
+}
+
+async function deleteFechamentoFromCloud(fechId) {
+  if (!currentUser) return;
+  try {
+    await deleteDoc(fechDocRef(fechId));
+  } catch (e) {
+    console.warn("deleteFechamentoFromCloud:", e);
+  }
+}
+
+function startRealtimeListener() {
+  if (unsubscribeFechamentos) {
+    unsubscribeFechamentos();
+    unsubscribeFechamentos = null;
+  }
+  if (!currentUser) return;
+
+  unsubscribeFechamentos = onSnapshot(
+    fechColRef(),
+    (snap) => {
+      const fromCloud = [];
+      snap.forEach(d => {
+        const data = d.data();
+        fromCloud.push({
+          id: data.id || d.id,
+          mesInicial: data.mesInicial,
+          anoInicial: data.anoInicial,
+          inicio: data.inicio,
+          fim: data.fim,
+          nome: data.nome,
+          dias: data.dias || []
+        });
+      });
+
+      // Mesclar: nuvem é fonte da verdade quando online e há dados;
+      // se local tem algo que a nuvem ainda não refletiu (write recente offline),
+      // onSnapshot do Firestore com persistence já resolve a maioria dos casos.
+      // Aqui substituímos a lista local pela da nuvem (IDs estáveis).
+      appData.fechamentos = fromCloud;
+      saveLocal();
+      syncStatus = "ok";
+
+      // Re-render se estiver na tela principal ou no fechamento atual
+      if (currentScreenState.screen === "home") renderHome();
+      else if (currentScreenState.screen === "fechamento") {
+        if (!getFech()) {
+          currentScreenState = { screen: "home" };
+          renderHome();
+        } else renderFechamento();
+      }
+    },
+    (err) => {
+      console.warn("onSnapshot error:", err);
+      syncStatus = "err";
+    }
+  );
+}
+
+async function uploadAllLocalToCloud() {
+  if (!currentUser || !appData.fechamentos.length) return;
+  try {
+    const batch = writeBatch(db);
+    let count = 0;
+    for (const f of appData.fechamentos) {
+      const ref = fechDocRef(f.id);
+      batch.set(ref, {
+        id: f.id,
+        mesInicial: f.mesInicial,
+        anoInicial: f.anoInicial,
+        inicio: f.inicio,
+        fim: f.fim,
+        nome: f.nome,
+        dias: f.dias,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+      count++;
+      if (count % 400 === 0) {
+        await batch.commit();
+      }
+    }
+    await batch.commit();
+    return true;
+  } catch (e) {
+    console.error("uploadAllLocalToCloud:", e);
+    return false;
+  }
+}
+
+// ---------- migração de dados legados ----------
+async function maybeMigrateLegacy() {
+  if (!currentUser) return;
+  migrationDoneKey = `migrationDone_${currentUser.uid}`;
+  if (localStorage.getItem(migrationDoneKey) === "1") return;
+
+  const legacy = loadLegacyLocal();
+  if (!legacy || !legacy.fechamentos.length) {
+    localStorage.setItem(migrationDoneKey, "1");
+    return;
+  }
+
+  // Verifica se já há dados na nuvem
+  let cloudEmpty = true;
+  try {
+    const snap = await getDocs(fechColRef());
+    cloudEmpty = snap.empty;
+  } catch (e) {
+    console.warn("maybeMigrateLegacy getDocs:", e);
+    // Se offline, tenta mais tarde; não marca como feito
+    return;
+  }
+
+  if (!cloudEmpty) {
+    // Já existe nuvem — marca migração e não sobrescreve
+    localStorage.setItem(migrationDoneKey, "1");
+    return;
+  }
+
+  // Oferece migração
+  return new Promise(resolve => {
+    const total = legacy.fechamentos.reduce((s, f) => s + f.dias.reduce((s2, d) => s2 + d.rotas.reduce((s3, r) => s3 + r.entregas, 0), 0), 0);
+    const modal = `<div class="modal-bg"><div class="modal">
+      <h3>Dados locais encontrados</h3>
+      <p style="color:var(--muted)">Encontramos ${legacy.fechamentos.length} fechamento(s) e ${total} entregas salvos neste dispositivo (versão anterior).</p>
+      <p>Deseja enviar esses dados para sua conta na nuvem?</p>
+      <div class="row">
+        <button class="btn-sec" id="migSkip">NÃO ENVIAR</button>
+        <button class="btn-pri" id="migOk">ENVIAR</button>
+      </div>
+    </div></div>`;
+    document.getElementById("modalRoot").innerHTML = modal;
+    document.getElementById("migSkip").onclick = () => {
+      localStorage.setItem(migrationDoneKey, "1");
+      closeModal();
+      resolve();
+    };
+    document.getElementById("migOk").onclick = async () => {
+      // Copia legado para appData do usuário e sobe
+      appData = JSON.parse(JSON.stringify(legacy));
+      saveLocal();
+      const ok = await uploadAllLocalToCloud();
+      if (ok) {
+        localStorage.setItem(migrationDoneKey, "1");
+        // Opcional: limpar chave legada só depois de sucesso
+        // localStorage.removeItem("controleEntregasData");
+        alert("Dados migrados com sucesso!");
+      } else {
+        alert("Não foi possível enviar agora. Seus dados locais foram preservados. Tente novamente quando houver internet.");
+      }
+      closeModal();
+      resolve();
+    };
+  });
+}
+
+// ---------- Auth UI ----------
+function showLoading() {
+  document.getElementById("topbar").style.display = "none";
+  document.getElementById("app").innerHTML = `<div class="loading-center">Carregando…</div>`;
+}
+
+function renderAuth(mode) {
+  // mode: "login" | "register"
+  document.getElementById("topbar").style.display = "none";
+  const isLogin = mode !== "register";
+  const html = `
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <h2>${isLogin ? "ACESSAR APLICATIVO" : "CRIAR CONTA"}</h2>
+      <div class="sub">Controle de Entregas</div>
+      <label>E-mail</label>
+      <input type="email" id="authEmail" autocomplete="email" inputmode="email" placeholder="seu@email.com">
+      <label>Senha de 6 dígitos</label>
+      <input type="password" id="authPass" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="${isLogin ? "current-password" : "new-password"}" placeholder="••••••">
+      ${!isLogin ? `<label>Confirmar senha</label><input type="password" id="authPass2" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="new-password" placeholder="••••••">` : ""}
+      <div class="auth-err" id="authErr"></div>
+      <button class="btn-full btn-pri" id="authSubmit">${isLogin ? "ENTRAR" : "CRIAR CONTA"}</button>
+      <button class="linkbtn" id="authToggle">${isLogin ? "Criar conta" : "Já tenho conta — Entrar"}</button>
+    </div>
+  </div>`;
+  document.getElementById("app").innerHTML = html;
+
+  document.getElementById("authSubmit").onclick = () => isLogin ? doLogin() : doRegister();
+  document.getElementById("authToggle").onclick = () => renderAuth(isLogin ? "register" : "login");
+  // Enter key
+  document.getElementById("authPass").addEventListener("keydown", e => { if (e.key === "Enter") isLogin ? doLogin() : doRegister(); });
+  if (!isLogin) {
+    document.getElementById("authPass2").addEventListener("keydown", e => { if (e.key === "Enter") doRegister(); });
+  }
+}
+
+function setAuthErr(msg) {
+  const el = document.getElementById("authErr");
+  if (el) el.textContent = msg || "";
+}
+
+function validateEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+function validatePass(pass) {
+  return /^\d{6}$/.test(pass);
+}
+
+async function doLogin() {
+  const email = (document.getElementById("authEmail").value || "").trim();
+  const pass = (document.getElementById("authPass").value || "").trim();
+  setAuthErr("");
+  if (!validateEmail(email)) { setAuthErr("Informe um e-mail válido."); return; }
+  if (!validatePass(pass)) { setAuthErr("A senha deve ter exatamente 6 dígitos numéricos."); return; }
+  try {
+    await signInWithEmailAndPassword(auth, email, pass);
+    // onAuthStateChanged cuida do resto
+  } catch (e) {
+    console.warn(e);
+    if (e.code === "auth/user-not-found" || e.code === "auth/wrong-password" || e.code === "auth/invalid-credential") {
+      setAuthErr("E-mail ou senha incorretos.");
+    } else if (e.code === "auth/too-many-requests") {
+      setAuthErr("Muitas tentativas. Aguarde um pouco.");
+    } else if (e.code === "auth/network-request-failed") {
+      setAuthErr("Sem conexão. Verifique a internet.");
+    } else {
+      setAuthErr("Não foi possível entrar. Tente novamente.");
+    }
+  }
+}
+
+async function doRegister() {
+  const email = (document.getElementById("authEmail").value || "").trim();
+  const pass = (document.getElementById("authPass").value || "").trim();
+  const pass2 = (document.getElementById("authPass2").value || "").trim();
+  setAuthErr("");
+  if (!validateEmail(email)) { setAuthErr("Informe um e-mail válido."); return; }
+  if (!validatePass(pass)) { setAuthErr("A senha deve ter exatamente 6 dígitos numéricos."); return; }
+  if (pass !== pass2) { setAuthErr("As senhas não coincidem."); return; }
+  try {
+    await createUserWithEmailAndPassword(auth, email, pass);
+  } catch (e) {
+    console.warn(e);
+    if (e.code === "auth/email-already-in-use") {
+      setAuthErr("Este e-mail já está cadastrado.");
+    } else if (e.code === "auth/weak-password") {
+      setAuthErr("Senha fraca. Use 6 dígitos numéricos.");
+    } else if (e.code === "auth/network-request-failed") {
+      setAuthErr("Sem conexão. Verifique a internet.");
+    } else {
+      setAuthErr("Não foi possível criar a conta. Tente novamente.");
+    }
+  }
+}
+
+async function doLogout() {
+  closeModal();
+  if (unsubscribeFechamentos) {
+    unsubscribeFechamentos();
+    unsubscribeFechamentos = null;
+  }
+  try {
+    await signOut(auth);
+  } catch (e) {
+    console.warn(e);
+  }
+  currentUser = null;
+  currentFechId = null;
+  appData = { version: 1, fechamentos: [] };
+  renderAuth("login");
+}
+
+// ---------- após autenticação ----------
+async function onUserReady(user) {
+  currentUser = user;
+  document.getElementById("topbar").style.display = "flex";
+  loadLocal();
+  showLoading();
+
+  // Migração legada (se houver)
+  await maybeMigrateLegacy();
+
+  // Listener em tempo real (com persistence offline)
+  startRealtimeListener();
+
+  // Se local tem dados e nuvem ainda vazia (ex.: offline na 1ª vez), sobe quando possível
+  if (appData.fechamentos.length > 0) {
+    // tenta upload em background (não bloqueia UI)
+    uploadAllLocalToCloud().catch(() => {});
+  }
+
+  currentScreenState = { screen: "home" };
+  initHistory();
+  renderHome();
+}
 
 // ---------- render home ----------
-function renderHome(){
-  currentFechId=null;
-  const app=document.getElementById("app");
-  let html="";
-  appData.fechamentos.slice().sort((a,b)=>a.inicio.localeCompare(b.inicio)).forEach(f=>{
-    html+=`<div class="card" onclick="openFechamento('${f.id}')">
+function renderHome() {
+  currentFechId = null;
+  const app = document.getElementById("app");
+  let html = "";
+  appData.fechamentos.slice().sort((a, b) => a.inicio.localeCompare(b.inicio)).forEach(f => {
+    html += `<div class="card" onclick="openFechamento('${f.id}')">
       <h3>${f.nome}</h3>
       <div class="per">${fmtDate(f.inicio)} → ${fmtDate(f.fim)}</div>
       <div class="tot">Total: ${totalEntregasFechamento(f)} entregas</div>
     </div>`;
   });
-  html+=`<button class="newbtn" onclick="openNewFechamento()">＋ NOVO FECHAMENTO</button>`;
-  app.innerHTML=html;
+  html += `<button class="newbtn" onclick="openNewFechamento()">＋ NOVO FECHAMENTO</button>`;
+  app.innerHTML = html;
 }
 
-function openNewFechamento(){
-  const now=new Date();
-  const modal=`<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+function openNewFechamento() {
+  const now = new Date();
+  const modal = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal">
       <h3>Novo Fechamento</h3>
       <label>Mês inicial</label>
-      <select id="selMes">${MESES.map((m,i)=>`<option value="${i+1}" ${i===now.getMonth()?'selected':''}>${m}</option>`).join("")}</select>
+      <select id="selMes">${MESES.map((m, i) => `<option value="${i + 1}" ${i === now.getMonth() ? "selected" : ""}>${m}</option>`).join("")}</select>
       <label>Ano</label>
-      <select id="selAno">${[now.getFullYear()-1,now.getFullYear(),now.getFullYear()+1].map(a=>`<option value="${a}" ${a===now.getFullYear()?'selected':''}>${a}</option>`).join("")}</select>
+      <select id="selAno">${[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map(a => `<option value="${a}" ${a === now.getFullYear() ? "selected" : ""}>${a}</option>`).join("")}</select>
       <div id="periodoPreview" style="margin-top:8px;color:var(--muted);font-size:14px"></div>
       <div class="row">
         <button class="btn-sec" onclick="closeModal()">CANCELAR</button>
         <button class="btn-pri" onclick="criarFechamento()">CRIAR FECHAMENTO</button>
       </div>
     </div></div>`;
-  document.getElementById("modalRoot").innerHTML=modal;
+  document.getElementById("modalRoot").innerHTML = modal;
   updatePreview();
-  document.getElementById("selMes").onchange=updatePreview;
-  document.getElementById("selAno").onchange=updatePreview;
+  document.getElementById("selMes").onchange = updatePreview;
+  document.getElementById("selAno").onchange = updatePreview;
 }
-function updatePreview(){
-  const mes=+document.getElementById("selMes").value,ano=+document.getElementById("selAno").value;
-  const p=computePeriodo(mes,ano);
-  document.getElementById("periodoPreview").textContent=`Período: ${fmtDate(p.inicio)} → ${fmtDate(p.fim)}`;
+function updatePreview() {
+  const mes = +document.getElementById("selMes").value, ano = +document.getElementById("selAno").value;
+  const p = computePeriodo(mes, ano);
+  document.getElementById("periodoPreview").textContent = `Período: ${fmtDate(p.inicio)} → ${fmtDate(p.fim)}`;
 }
-function criarFechamento(){
-  const mes=+document.getElementById("selMes").value,ano=+document.getElementById("selAno").value;
-  const p=computePeriodo(mes,ano);
-  if(appData.fechamentos.some(f=>f.inicio===p.inicio&&f.fim===p.fim)){
-    alert("Este fechamento já existe.");return;
+function criarFechamento() {
+  const mes = +document.getElementById("selMes").value, ano = +document.getElementById("selAno").value;
+  const p = computePeriodo(mes, ano);
+  if (appData.fechamentos.some(f => f.inicio === p.inicio && f.fim === p.fim)) {
+    alert("Este fechamento já existe."); return;
   }
-  const dias=daysBetween(p.inicio,p.fim).map(iso=>({data:iso,domingoBloqueado:isSunday(iso),rotas:[]}));
-  appData.fechamentos.push({id:uid(),mesInicial:mes,anoInicial:ano,inicio:p.inicio,fim:p.fim,nome:p.nome,dias});
-  save();closeModal();renderHome();
+  const dias = daysBetween(p.inicio, p.fim).map(iso => ({ data: iso, domingoBloqueado: isSunday(iso), rotas: [] }));
+  const novo = { id: uid(), mesInicial: mes, anoInicial: ano, inicio: p.inicio, fim: p.fim, nome: p.nome, dias };
+  appData.fechamentos.push(novo);
+  saveLocal();
+  syncFechamentoToCloud(novo);
+  closeModal();
+  renderHome();
 }
 
 // ---------- render fechamento ----------
-function openFechamento(id){currentFechId=id;pushAppState({screen:"fechamento",id:id});renderFechamento();}
-function getFech(){return appData.fechamentos.find(f=>f.id===currentFechId);}
+function openFechamento(id) { currentFechId = id; pushAppState({ screen: "fechamento", id: id }); renderFechamento(); }
+function getFech() { return appData.fechamentos.find(f => f.id === currentFechId); }
 
-function renderFechamento(){
-  const f=getFech();if(!f){renderHome();return;}
-  const app=document.getElementById("app");
-  let html=`<button class="backbtn" onclick="history.back()">← Voltar</button>
+function renderFechamento() {
+  const f = getFech(); if (!f) { renderHome(); return; }
+  const app = document.getElementById("app");
+  let html = `<button class="backbtn" onclick="history.back()">← Voltar</button>
     <div class="card" style="cursor:default">
       <h3>${f.nome}</h3>
       <div class="per">${fmtDate(f.inicio)} → ${fmtDate(f.fim)}</div>
     </div>`;
-  f.dias.forEach(dia=>{
-    const sab=isSaturday(dia.data),dom=isSunday(dia.data);
-    const cls=sab?"sab":dom?"dom":"";
-    html+=`<div class="dayrow ${cls}">
+  f.dias.forEach(dia => {
+    const sab = isSaturday(dia.data), dom = isSunday(dia.data);
+    const cls = sab ? "sab" : dom ? "dom" : "";
+    html += `<div class="dayrow ${cls}">
       <div class="dayhead"><b>${fmtDateShort(dia.data)}</b><span>${weekdayOf(dia.data)}</span></div>
       <div class="routes">`;
-    if(dom&&dia.domingoBloqueado&&dia.rotas.length===0){
-      html+=`<span class="locked" onclick="tentarLiberarDomingo('${dia.data}')">🔒 bloqueado</span>`;
-    }else{
-      dia.rotas.forEach(r=>{
-        html+=`<button class="rbox" onclick="editarRota('${dia.data}','${r.id}')">${r.entregas}</button>`;
+    if (dom && dia.domingoBloqueado && dia.rotas.length === 0) {
+      html += `<span class="locked" onclick="tentarLiberarDomingo('${dia.data}')">🔒 bloqueado</span>`;
+    } else {
+      dia.rotas.forEach(r => {
+        html += `<button class="rbox" onclick="editarRota('${dia.data}','${r.id}')">${r.entregas}</button>`;
       });
-      html+=`<button class="addbtn" onclick="tentarAdicionarRota('${dia.data}')">+</button>`;
+      html += `<button class="addbtn" onclick="tentarAdicionarRota('${dia.data}')">+</button>`;
     }
-    html+=`<span class="daytotal">${totalDia(dia)}</span></div></div>`;
+    html += `<span class="daytotal">${totalDia(dia)}</span></div></div>`;
   });
-  html+=`<div class="summary">
+  html += `<div class="summary">
     <div>TOTAL DE ROTAS: <b>${totalRotasFechamento(f)}</b></div>
     <div>TOTAL DE ENTREGAS: <b>${totalEntregasFechamento(f)}</b></div>
     <div style="margin-top:12px"><button class="btn-danger" style="padding:10px 18px;border-radius:8px;border:none;cursor:pointer" onclick="confirmarExcluirFechamento()">Excluir Fechamento</button></div>
   </div>`;
-  app.innerHTML=html;
+  app.innerHTML = html;
 }
 
-function tentarAdicionarRota(dataIso){
-  const f=getFech();const dia=f.dias.find(d=>d.data===dataIso);
-  if(isSunday(dataIso)&&dia.domingoBloqueado){
-    modalConfirm("Este domingo está bloqueado para lançamentos.","Deseja liberar este dia?","LIBERAR DOMINGO",()=>{
-      dia.domingoBloqueado=false;save();closeModal();abrirModalNovaRota(dataIso);
+function tentarAdicionarRota(dataIso) {
+  const f = getFech(); const dia = f.dias.find(d => d.data === dataIso);
+  if (isSunday(dataIso) && dia.domingoBloqueado) {
+    modalConfirm("Este domingo está bloqueado para lançamentos.", "Deseja liberar este dia?", "LIBERAR DOMINGO", () => {
+      dia.domingoBloqueado = false; saveLocal(); syncFechamentoToCloud(f); closeModal(); abrirModalNovaRota(dataIso);
     });
     return;
   }
   abrirModalNovaRota(dataIso);
 }
-function tentarLiberarDomingo(dataIso){tentarAdicionarRota(dataIso);}
+function tentarLiberarDomingo(dataIso) { tentarAdicionarRota(dataIso); }
 
-function abrirModalNovaRota(dataIso){
-  const modal=`<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+function abrirModalNovaRota(dataIso) {
+  const modal = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal">
       <h3>Nova Rota</h3>
       <label>Quantidade de entregas</label>
@@ -285,21 +702,24 @@ function abrirModalNovaRota(dataIso){
         <button class="btn-pri" onclick="salvarNovaRota('${dataIso}')">SALVAR</button>
       </div>
     </div></div>`;
-  document.getElementById("modalRoot").innerHTML=modal;
+  document.getElementById("modalRoot").innerHTML = modal;
   document.getElementById("inpQtd").focus();
 }
-function salvarNovaRota(dataIso){
-  const val=parseInt(document.getElementById("inpQtd").value);
-  if(isNaN(val)||val<0){alert("Digite uma quantidade válida.");return;}
-  const f=getFech();const dia=f.dias.find(d=>d.data===dataIso);
-  dia.rotas.push({id:uid(),entregas:val});
-  save();closeModal();renderFechamento();
+function salvarNovaRota(dataIso) {
+  const val = parseInt(document.getElementById("inpQtd").value);
+  if (isNaN(val) || val < 0) { alert("Digite uma quantidade válida."); return; }
+  const f = getFech(); const dia = f.dias.find(d => d.data === dataIso);
+  dia.rotas.push({ id: uid(), entregas: val });
+  saveLocal();
+  syncFechamentoToCloud(f);
+  closeModal();
+  renderFechamento();
 }
 
-function editarRota(dataIso,rotaId){
-  const f=getFech();const dia=f.dias.find(d=>d.data===dataIso);
-  const rota=dia.rotas.find(r=>r.id===rotaId);
-  const modal=`<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+function editarRota(dataIso, rotaId) {
+  const f = getFech(); const dia = f.dias.find(d => d.data === dataIso);
+  const rota = dia.rotas.find(r => r.id === rotaId);
+  const modal = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal">
       <h3>Editar Rota</h3>
       <label>Quantidade de entregas</label>
@@ -310,50 +730,60 @@ function editarRota(dataIso,rotaId){
         <button class="btn-pri" onclick="salvarEdicaoRota('${dataIso}','${rotaId}')">SALVAR</button>
       </div>
     </div></div>`;
-  document.getElementById("modalRoot").innerHTML=modal;
+  document.getElementById("modalRoot").innerHTML = modal;
 }
-function salvarEdicaoRota(dataIso,rotaId){
-  const val=parseInt(document.getElementById("inpQtdEdit").value);
-  if(isNaN(val)||val<0){alert("Digite uma quantidade válida.");return;}
-  const f=getFech();const dia=f.dias.find(d=>d.data===dataIso);
-  const rota=dia.rotas.find(r=>r.id===rotaId);rota.entregas=val;
-  save();closeModal();renderFechamento();
+function salvarEdicaoRota(dataIso, rotaId) {
+  const val = parseInt(document.getElementById("inpQtdEdit").value);
+  if (isNaN(val) || val < 0) { alert("Digite uma quantidade válida."); return; }
+  const f = getFech(); const dia = f.dias.find(d => d.data === dataIso);
+  const rota = dia.rotas.find(r => r.id === rotaId); rota.entregas = val;
+  saveLocal();
+  syncFechamentoToCloud(f);
+  closeModal();
+  renderFechamento();
 }
-function excluirRota(dataIso,rotaId){
-  modalConfirm("Excluir esta rota?","","EXCLUIR",()=>{
-    const f=getFech();const dia=f.dias.find(d=>d.data===dataIso);
-    dia.rotas=dia.rotas.filter(r=>r.id!==rotaId);
-    save();closeModal();renderFechamento();
-  },true);
+function excluirRota(dataIso, rotaId) {
+  modalConfirm("Excluir esta rota?", "", "EXCLUIR", () => {
+    const f = getFech(); const dia = f.dias.find(d => d.data === dataIso);
+    dia.rotas = dia.rotas.filter(r => r.id !== rotaId);
+    saveLocal();
+    syncFechamentoToCloud(f);
+    closeModal();
+    renderFechamento();
+  }, true);
 }
 
-function confirmarExcluirFechamento(){
-  const f=getFech();
-  modalConfirm("ATENÇÃO",`Você está prestes a excluir o fechamento ${f.nome}. Todos os dias e rotas deste fechamento serão removidos.`,"EXCLUIR",()=>{
-    appData.fechamentos=appData.fechamentos.filter(x=>x.id!==f.id);
-    save();closeModal();renderHome();
-  },true);
+function confirmarExcluirFechamento() {
+  const f = getFech();
+  modalConfirm("ATENÇÃO", `Você está prestes a excluir o fechamento ${f.nome}. Todos os dias e rotas deste fechamento serão removidos.`, "EXCLUIR", () => {
+    appData.fechamentos = appData.fechamentos.filter(x => x.id !== f.id);
+    saveLocal();
+    deleteFechamentoFromCloud(f.id);
+    closeModal();
+    renderHome();
+  }, true);
 }
 
 // ---------- modal genérico ----------
-function modalConfirm(title,msg,okLabel,onOk,danger){
-  const modal=`<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+function modalConfirm(title, msg, okLabel, onOk, danger) {
+  const modal = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal">
       <h3>${title}</h3>
       <p style="color:var(--muted)">${msg}</p>
       <div class="row">
         <button class="btn-sec" onclick="closeModal()">CANCELAR</button>
-        <button class="${danger?'btn-danger':'btn-pri'}" id="okBtn">${okLabel}</button>
+        <button class="${danger ? "btn-danger" : "btn-pri"}" id="okBtn">${okLabel}</button>
       </div>
     </div></div>`;
-  document.getElementById("modalRoot").innerHTML=modal;
-  document.getElementById("okBtn").onclick=onOk;
+  document.getElementById("modalRoot").innerHTML = modal;
+  document.getElementById("okBtn").onclick = onOk;
 }
-function closeModal(){document.getElementById("modalRoot").innerHTML="";}
+function closeModal() { document.getElementById("modalRoot").innerHTML = ""; }
 
 // ---------- configurações ----------
-function openSettings(){
-  const modal=`<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+function openSettings() {
+  const email = currentUser ? currentUser.email : "";
+  const modal = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal">
       <h3>Configurações</h3>
       <div class="settlist">
@@ -361,61 +791,81 @@ function openSettings(){
         <button onclick="exportarBackup()">💾 Exportar Backup</button>
         <button onclick="document.getElementById('fileInput').click()">📥 Restaurar Backup</button>
         <button onclick="gerenciarFechamentos()">🗂️ Gerenciar Fechamentos</button>
+        <button onclick="mostrarConta()">👤 Conta</button>
         <button onclick="sobre()">ℹ️ Sobre</button>
       </div>
       <div class="row"><button class="btn-sec" onclick="closeModal()">FECHAR</button></div>
     </div></div>`;
-  document.getElementById("modalRoot").innerHTML=modal;
+  document.getElementById("modalRoot").innerHTML = modal;
 }
-function sobre(){
-  alert("Controle de Entregas\nCaderno digital de fechamento de entregas.\nDados salvos localmente no navegador.");
+function mostrarConta() {
+  const email = currentUser ? currentUser.email : "—";
+  const modal = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <h3>Conta</h3>
+      <p style="color:var(--muted);font-size:14px;margin:0 0 4px">E-mail</p>
+      <p style="font-weight:600;margin:0 0 16px;word-break:break-all">${email}</p>
+      <div class="row">
+        <button class="btn-sec" onclick="closeModal()">FECHAR</button>
+        <button class="btn-danger" onclick="doLogout()">SAIR</button>
+      </div>
+    </div></div>`;
+  document.getElementById("modalRoot").innerHTML = modal;
 }
-function gerenciarFechamentos(){
-  let html=`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal"><h3>Gerenciar Fechamentos</h3><div class="settlist">`;
-  appData.fechamentos.forEach(f=>{
-    html+=`<button onclick="closeModal();openFechamento('${f.id}')">${f.nome} (${totalEntregasFechamento(f)} entregas)</button>`;
+function sobre() {
+  alert("Controle de Entregas\nCaderno digital de fechamento de entregas.\nDados salvos localmente e sincronizados na nuvem.");
+}
+function gerenciarFechamentos() {
+  let html = `<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal"><h3>Gerenciar Fechamentos</h3><div class="settlist">`;
+  appData.fechamentos.forEach(f => {
+    html += `<button onclick="closeModal();openFechamento('${f.id}')">${f.nome} (${totalEntregasFechamento(f)} entregas)</button>`;
   });
-  if(appData.fechamentos.length===0)html+=`<p style="color:var(--muted)">Nenhum fechamento criado.</p>`;
-  html+=`</div><div class="row"><button class="btn-sec" onclick="closeModal()">FECHAR</button></div></div></div>`;
-  document.getElementById("modalRoot").innerHTML=html;
+  if (appData.fechamentos.length === 0) html += `<p style="color:var(--muted)">Nenhum fechamento criado.</p>`;
+  html += `</div><div class="row"><button class="btn-sec" onclick="closeModal()">FECHAR</button></div></div></div>`;
+  document.getElementById("modalRoot").innerHTML = html;
 }
 
 // ---------- backup ----------
-function exportarBackup(){
-  const now=new Date();
-  const backup={version:1,criadoEm:now.toISOString(),appData:appData};
-  const blob=new Blob([JSON.stringify(backup,null,2)],{type:"application/json"});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement("a");
-  a.href=url;
-  a.download=`controle-entregas-backup-${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}.json`;
-  document.body.appendChild(a);a.click();document.body.removeChild(a);
+function exportarBackup() {
+  const now = new Date();
+  const backup = {
+    version: 1,
+    criadoEm: now.toISOString(),
+    email: currentUser ? currentUser.email : null,
+    appData: appData
+  };
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `controle-entregas-backup-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
   closeModal();
 }
 
-let pendingBackup=null;
-function handleFile(ev){
-  const file=ev.target.files[0];if(!file)return;
-  const reader=new FileReader();
-  reader.onload=e=>{
-    try{
-      const backup=JSON.parse(e.target.result);
-      if(!backup.appData||!backup.appData.fechamentos)throw new Error("formato inválido");
-      pendingBackup=backup;
+let pendingBackup = null;
+function handleFile(ev) {
+  const file = ev.target.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const backup = JSON.parse(e.target.result);
+      if (!backup.appData || !backup.appData.fechamentos) throw new Error("formato inválido");
+      pendingBackup = backup;
       mostrarInfoBackup(backup);
-    }catch(err){alert("Arquivo de backup inválido.");}
+    } catch (err) { alert("Arquivo de backup inválido."); }
   };
   reader.readAsText(file);
-  ev.target.value="";
+  ev.target.value = "";
 }
-function mostrarInfoBackup(backup){
-  const fs=backup.appData.fechamentos;
-  const dias=fs.reduce((s,f)=>s+f.dias.length,0);
-  const entregas=fs.reduce((s,f)=>s+totalEntregasFechamento(f),0);
-  const dt=backup.criadoEm?new Date(backup.criadoEm):null;
-  const dtStr=dt?`${fmtDate(dt.toISOString().slice(0,10))} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`:"desconhecida";
-  const modal=`<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+function mostrarInfoBackup(backup) {
+  const fs = backup.appData.fechamentos;
+  const dias = fs.reduce((s, f) => s + f.dias.length, 0);
+  const entregas = fs.reduce((s, f) => s + totalEntregasFechamento(f), 0);
+  const dt = backup.criadoEm ? new Date(backup.criadoEm) : null;
+  const dtStr = dt ? `${fmtDate(dt.toISOString().slice(0, 10))} ${pad(dt.getHours())}:${pad(dt.getMinutes())}` : "desconhecida";
+  const modal = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal">
       <h3>Backup Encontrado</h3>
       <p>Criado em: <b>${dtStr}</b></p>
@@ -429,41 +879,53 @@ function mostrarInfoBackup(backup){
       </div>
       <div class="row"><button class="btn-sec" onclick="closeModal()">CANCELAR</button></div>
     </div></div>`;
-  document.getElementById("modalRoot").innerHTML=modal;
+  document.getElementById("modalRoot").innerHTML = modal;
 }
-function confirmarSubstituir(){
-  modalConfirm("Confirmar substituição","Os dados atuais serão substituídos pelo backup. Esta operação pode remover informações que ainda não estejam salvas em outro backup.","CONFIRMAR",()=>{
-    appData=pendingBackup.appData;save();closeModal();renderHome();
-  },true);
+function confirmarSubstituir() {
+  modalConfirm("Confirmar substituição", "Os dados atuais serão substituídos pelo backup. Esta operação pode remover informações que ainda não estejam salvas em outro backup.", "CONFIRMAR", async () => {
+    // Remove fechamentos atuais da nuvem
+    const oldIds = appData.fechamentos.map(f => f.id);
+    appData = JSON.parse(JSON.stringify(pendingBackup.appData));
+    saveLocal();
+    for (const id of oldIds) {
+      if (!appData.fechamentos.find(f => f.id === id)) {
+        await deleteFechamentoFromCloud(id);
+      }
+    }
+    await uploadAllLocalToCloud();
+    closeModal();
+    renderHome();
+  }, true);
 }
-function mesclarBackup(){
-  const incoming=pendingBackup.appData;
-  let novoFech=0,diasNovos=0,rotasNovas=0,ignorados=0;
-  incoming.fechamentos.forEach(bf=>{
-    let existente=appData.fechamentos.find(f=>f.inicio===bf.inicio&&f.fim===bf.fim);
-    if(!existente){
+function mesclarBackup() {
+  const incoming = pendingBackup.appData;
+  let novoFech = 0, diasNovos = 0, rotasNovas = 0, ignorados = 0;
+  incoming.fechamentos.forEach(bf => {
+    let existente = appData.fechamentos.find(f => f.inicio === bf.inicio && f.fim === bf.fim);
+    if (!existente) {
       appData.fechamentos.push(JSON.parse(JSON.stringify(bf)));
-      novoFech++;diasNovos+=bf.dias.length;
-      bf.dias.forEach(d=>rotasNovas+=d.rotas.length);
-    }else{
-      bf.dias.forEach(bd=>{
-        let existDia=existente.dias.find(d=>d.data===bd.data);
-        if(!existDia){
+      novoFech++; diasNovos += bf.dias.length;
+      bf.dias.forEach(d => rotasNovas += d.rotas.length);
+    } else {
+      bf.dias.forEach(bd => {
+        let existDia = existente.dias.find(d => d.data === bd.data);
+        if (!existDia) {
           existente.dias.push(JSON.parse(JSON.stringify(bd)));
-          diasNovos++;rotasNovas+=bd.rotas.length;
-        }else{
-          bd.rotas.forEach(br=>{
-            if(!existDia.rotas.find(r=>r.id===br.id)){
+          diasNovos++; rotasNovas += bd.rotas.length;
+        } else {
+          bd.rotas.forEach(br => {
+            if (!existDia.rotas.find(r => r.id === br.id)) {
               existDia.rotas.push(JSON.parse(JSON.stringify(br)));
               rotasNovas++;
-            }else ignorados++;
+            } else ignorados++;
           });
         }
       });
     }
   });
-  save();
-  const modal=`<div class="modal-bg"><div class="modal">
+  saveLocal();
+  uploadAllLocalToCloud();
+  const modal = `<div class="modal-bg"><div class="modal">
     <h3>Backup Mesclado</h3>
     <p>${incoming.fechamentos.length} fechamentos encontrados</p>
     <p>${novoFech} fechamento(s) novo(s)</p>
@@ -472,11 +934,59 @@ function mesclarBackup(){
     <p>${ignorados} registro(s) já existente(s) ignorados</p>
     <div class="row"><button class="btn-pri" onclick="closeModal();renderHome()">OK</button></div>
   </div></div>`;
-  document.getElementById("modalRoot").innerHTML=modal;
+  document.getElementById("modalRoot").innerHTML = modal;
 }
 
+// ---------- online/offline indicator (silencioso) ----------
+window.addEventListener("online", () => {
+  syncStatus = "ok";
+  if (currentUser && appData.fechamentos.length) {
+    uploadAllLocalToCloud().catch(() => {});
+  }
+});
+window.addEventListener("offline", () => { syncStatus = "off"; });
+
 // ---------- init ----------
-load();initHistory();setupPWA();renderHome();
+setupPWA();
+showLoading();
+
+onAuthStateChanged(auth, async (user) => {
+  if (user) {
+    await onUserReady(user);
+  } else {
+    currentUser = null;
+    if (unsubscribeFechamentos) {
+      unsubscribeFechamentos();
+      unsubscribeFechamentos = null;
+    }
+    renderAuth("login");
+  }
+});
+
+// Expor funções usadas pelos onclick do HTML (módulo ES isola o escopo)
+window.openSettings = openSettings;
+window.openNewFechamento = openNewFechamento;
+window.criarFechamento = criarFechamento;
+window.openFechamento = openFechamento;
+window.tentarAdicionarRota = tentarAdicionarRota;
+window.tentarLiberarDomingo = tentarLiberarDomingo;
+window.salvarNovaRota = salvarNovaRota;
+window.editarRota = editarRota;
+window.salvarEdicaoRota = salvarEdicaoRota;
+window.excluirRota = excluirRota;
+window.confirmarExcluirFechamento = confirmarExcluirFechamento;
+window.closeModal = closeModal;
+window.instalarApp = instalarApp;
+window.exportarBackup = exportarBackup;
+window.gerenciarFechamentos = gerenciarFechamentos;
+window.sobre = sobre;
+window.mostrarConta = mostrarConta;
+window.doLogout = doLogout;
+window.confirmarSubstituir = confirmarSubstituir;
+window.mesclarBackup = mesclarBackup;
+window.confirmarSaida = confirmarSaida;
+window.handleFile = handleFile;
+window.renderHome = renderHome;
 </script>
 </body>
 </html>
