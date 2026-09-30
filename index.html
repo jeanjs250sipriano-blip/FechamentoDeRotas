@@ -24,8 +24,20 @@ body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:va
 .dayhead b{color:var(--txt);font-size:13px}
 .routes{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .rbox{width:38px;height:38px;border-radius:8px;background:var(--pri);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;cursor:pointer;border:none}
-.addbtn{width:38px;height:38px;border-radius:8px;background:#e5e7eb;color:var(--txt);font-size:20px;border:none;cursor:pointer}
-.daytotal{font-weight:700;margin-left:auto;padding-left:8px}
+.rbox.coleta{background:#f9a8a8;color:#7f1d1d}
+.rwrap{display:flex;flex-direction:column;align-items:center;gap:2px;max-width:52px}
+.rlbl{font-size:9px;line-height:1.1;color:#9f1239;font-weight:600;text-align:center;max-width:52px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 1px}
+.addbtn{width:38px;height:38px;border-radius:8px;background:#e5e7eb;color:var(--txt);font-size:20px;border:none;cursor:pointer;align-self:flex-end}
+.daytotal{font-weight:700;margin-left:auto;padding-left:8px;align-self:center}
+.chk-row{display:flex;align-items:center;gap:10px;margin:10px 0;padding:10px 12px;background:#f8fafc;border-radius:8px;border:1px solid var(--bord);cursor:pointer;user-select:none}
+.chk-row input{width:18px;height:18px;accent-color:var(--pri);cursor:pointer}
+.chk-row span{font-size:14px;font-weight:500}
+.desc-box{margin-top:4px}
+.desc-box label{font-size:12px;color:var(--muted)}
+.desc-box input{width:100%;padding:10px;font-size:15px;border:1px solid var(--bord);border-radius:8px;margin-top:4px}
+.tipo-badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;margin-bottom:8px}
+.tipo-badge.normal{background:#dbeafe;color:#1e40af}
+.tipo-badge.coleta{background:#fecaca;color:#9f1239}
 .locked{color:var(--muted);font-size:14px}
 .summary{background:var(--card);border-radius:12px;padding:16px;margin-top:12px;text-align:center}
 .summary div{margin:4px 0;font-size:15px}
@@ -115,7 +127,7 @@ setPersistence(auth, browserLocalPersistence).catch(e => console.warn("Auth pers
 
 // ============================================================
 // MODELO DE DADOS (preservado)
-// appData = { version:1, fechamentos:[ { id, mesInicial, anoInicial, inicio, fim, nome, dias:[ { data, domingoBloqueado, rotas:[ {id, entregas} ] } ] } ] }
+// appData = { version:1, fechamentos:[ { id, mesInicial, anoInicial, inicio, fim, nome, dias:[ { data, domingoBloqueado, rotas:[ {id, entregas, tipo?, descricao?} ] } ] } ] }
 // Firestore: users/{uid}/fechamentos/{fechId}  → documento com o fechamento completo
 // ============================================================
 const DIAS_SEMANA = ["DOMINGO","SEGUNDA-FEIRA","TERÇA-FEIRA","QUARTA-FEIRA","QUINTA-FEIRA","SEXTA-FEIRA","SÁBADO"];
@@ -265,6 +277,24 @@ function computePeriodo(mesInicial, anoInicial) {
 function totalDia(dia) { return dia.rotas.reduce((s, r) => s + r.entregas, 0); }
 function totalRotasFechamento(f) { return f.dias.reduce((s, d) => s + d.rotas.length, 0); }
 function totalEntregasFechamento(f) { return f.dias.reduce((s, d) => s + totalDia(d), 0); }
+
+function isColeta(r) { return r && r.tipo === "coleta"; }
+function labelRota(r) {
+  if (!isColeta(r)) return "";
+  const d = (r.descricao || "Coleta").trim();
+  return d || "Coleta";
+}
+function htmlRotaBox(dataIso, r) {
+  if (isColeta(r)) {
+    const lbl = labelRota(r).replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `<div class="rwrap" title="${lbl}">
+      <span class="rlbl">${lbl}</span>
+      <button class="rbox coleta" onclick="editarRota('${dataIso}','${r.id}')">${r.entregas}</button>
+    </div>`;
+  }
+  return `<button class="rbox" onclick="editarRota('${dataIso}','${r.id}')">${r.entregas}</button>`;
+}
+
 
 // ============================================================
 // FIRESTORE: sync
@@ -665,7 +695,7 @@ function renderFechamento() {
       html += `<span class="locked" onclick="tentarLiberarDomingo('${dia.data}')">🔒 bloqueado</span>`;
     } else {
       dia.rotas.forEach(r => {
-        html += `<button class="rbox" onclick="editarRota('${dia.data}','${r.id}')">${r.entregas}</button>`;
+        html += htmlRotaBox(dia.data, r);
       });
       html += `<button class="addbtn" onclick="tentarAdicionarRota('${dia.data}')">+</button>`;
     }
@@ -697,6 +727,14 @@ function abrirModalNovaRota(dataIso) {
       <h3>Nova Rota</h3>
       <label>Quantidade de entregas</label>
       <input type="number" id="inpQtd" min="0" inputmode="numeric" autofocus>
+      <label class="chk-row" for="chkColeta">
+        <input type="checkbox" id="chkColeta" onchange="toggleDescColeta()">
+        <span>É coleta</span>
+      </label>
+      <div class="desc-box hidden" id="boxDescColeta">
+        <label>Descrição</label>
+        <input type="text" id="inpDesc" value="Coleta" maxlength="40" placeholder="Ex: Coleta, Devolução…">
+      </div>
       <div class="row">
         <button class="btn-sec" onclick="closeModal()">CANCELAR</button>
         <button class="btn-pri" onclick="salvarNovaRota('${dataIso}')">SALVAR</button>
@@ -705,11 +743,30 @@ function abrirModalNovaRota(dataIso) {
   document.getElementById("modalRoot").innerHTML = modal;
   document.getElementById("inpQtd").focus();
 }
+function toggleDescColeta() {
+  const on = document.getElementById("chkColeta") && document.getElementById("chkColeta").checked;
+  const box = document.getElementById("boxDescColeta");
+  if (!box) return;
+  box.classList.toggle("hidden", !on);
+  if (on) {
+    const inp = document.getElementById("inpDesc");
+    if (inp && !inp.value.trim()) inp.value = "Coleta";
+  }
+}
 function salvarNovaRota(dataIso) {
   const val = parseInt(document.getElementById("inpQtd").value);
   if (isNaN(val) || val < 0) { alert("Digite uma quantidade válida."); return; }
   const f = getFech(); const dia = f.dias.find(d => d.data === dataIso);
-  dia.rotas.push({ id: uid(), entregas: val });
+  const isCol = document.getElementById("chkColeta") && document.getElementById("chkColeta").checked;
+  const rota = { id: uid(), entregas: val };
+  if (isCol) {
+    rota.tipo = "coleta";
+    const desc = (document.getElementById("inpDesc") && document.getElementById("inpDesc").value || "").trim();
+    rota.descricao = desc || "Coleta";
+  } else {
+    rota.tipo = "normal";
+  }
+  dia.rotas.push(rota);
   saveLocal();
   syncFechamentoToCloud(f);
   closeModal();
@@ -719,11 +776,22 @@ function salvarNovaRota(dataIso) {
 function editarRota(dataIso, rotaId) {
   const f = getFech(); const dia = f.dias.find(d => d.data === dataIso);
   const rota = dia.rotas.find(r => r.id === rotaId);
+  const col = isColeta(rota);
+  const desc = (rota.descricao || "Coleta").replace(/"/g, "&quot;");
   const modal = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal">
       <h3>Editar Rota</h3>
+      <span class="tipo-badge ${col ? "coleta" : "normal"}">${col ? (rota.descricao || "Coleta") : "Entrega normal"}</span>
       <label>Quantidade de entregas</label>
       <input type="number" id="inpQtdEdit" min="0" value="${rota.entregas}">
+      <label class="chk-row" for="chkColetaEdit">
+        <input type="checkbox" id="chkColetaEdit" ${col ? "checked" : ""} onchange="toggleDescColetaEdit()">
+        <span>É coleta</span>
+      </label>
+      <div class="desc-box ${col ? "" : "hidden"}" id="boxDescColetaEdit">
+        <label>Descrição</label>
+        <input type="text" id="inpDescEdit" value="${desc}" maxlength="40" placeholder="Ex: Coleta, Devolução…">
+      </div>
       <div class="row">
         <button class="btn-danger" onclick="excluirRota('${dataIso}','${rotaId}')">EXCLUIR</button>
         <button class="btn-sec" onclick="closeModal()">CANCELAR</button>
@@ -732,11 +800,31 @@ function editarRota(dataIso, rotaId) {
     </div></div>`;
   document.getElementById("modalRoot").innerHTML = modal;
 }
+function toggleDescColetaEdit() {
+  const on = document.getElementById("chkColetaEdit") && document.getElementById("chkColetaEdit").checked;
+  const box = document.getElementById("boxDescColetaEdit");
+  if (!box) return;
+  box.classList.toggle("hidden", !on);
+  if (on) {
+    const inp = document.getElementById("inpDescEdit");
+    if (inp && !inp.value.trim()) inp.value = "Coleta";
+  }
+}
 function salvarEdicaoRota(dataIso, rotaId) {
   const val = parseInt(document.getElementById("inpQtdEdit").value);
   if (isNaN(val) || val < 0) { alert("Digite uma quantidade válida."); return; }
   const f = getFech(); const dia = f.dias.find(d => d.data === dataIso);
-  const rota = dia.rotas.find(r => r.id === rotaId); rota.entregas = val;
+  const rota = dia.rotas.find(r => r.id === rotaId);
+  rota.entregas = val;
+  const isCol = document.getElementById("chkColetaEdit") && document.getElementById("chkColetaEdit").checked;
+  if (isCol) {
+    rota.tipo = "coleta";
+    const desc = (document.getElementById("inpDescEdit") && document.getElementById("inpDescEdit").value || "").trim();
+    rota.descricao = desc || "Coleta";
+  } else {
+    rota.tipo = "normal";
+    delete rota.descricao;
+  }
   saveLocal();
   syncFechamentoToCloud(f);
   closeModal();
@@ -973,6 +1061,8 @@ window.tentarLiberarDomingo = tentarLiberarDomingo;
 window.salvarNovaRota = salvarNovaRota;
 window.editarRota = editarRota;
 window.salvarEdicaoRota = salvarEdicaoRota;
+window.toggleDescColeta = toggleDescColeta;
+window.toggleDescColetaEdit = toggleDescColetaEdit;
 window.excluirRota = excluirRota;
 window.confirmarExcluirFechamento = confirmarExcluirFechamento;
 window.closeModal = closeModal;
