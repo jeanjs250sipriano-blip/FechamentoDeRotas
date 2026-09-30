@@ -25,10 +25,13 @@ body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:va
 .routes{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .rbox{width:38px;height:38px;border-radius:8px;background:var(--pri);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;cursor:pointer;border:none}
 .rbox.coleta{background:#f9a8a8;color:#7f1d1d}
-.rwrap{display:flex;flex-direction:column;align-items:center;gap:2px;max-width:52px}
-.rlbl{font-size:9px;line-height:1.1;color:#9f1239;font-weight:600;text-align:center;max-width:52px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 1px}
-.addbtn{width:38px;height:38px;border-radius:8px;background:#e5e7eb;color:var(--txt);font-size:20px;border:none;cursor:pointer;align-self:flex-end}
-.daytotal{font-weight:700;margin-left:auto;padding-left:8px;align-self:center}
+.routes{align-items:center}
+.rwrap{position:relative;display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;flex-shrink:0}
+.rlbl{position:absolute;left:50%;bottom:calc(100% + 1px);transform:translateX(-50%);font-size:9px;line-height:1.05;color:#9f1239;font-weight:600;text-align:center;max-width:56px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:none;z-index:1}
+.dayrow{padding-top:16px}
+.dayrow .dayhead{margin-top:-6px}
+.addbtn{width:38px;height:38px;border-radius:8px;background:#e5e7eb;color:var(--txt);font-size:20px;border:none;cursor:pointer}
+.daytotal{font-weight:700;margin-left:auto;padding-left:8px}
 .chk-row{display:flex;align-items:center;gap:10px;margin:10px 0;padding:10px 12px;background:#f8fafc;border-radius:8px;border:1px solid var(--bord);cursor:pointer;user-select:none}
 .chk-row input{width:18px;height:18px;accent-color:var(--pri);cursor:pointer}
 .chk-row span{font-size:14px;font-weight:500}
@@ -283,6 +286,12 @@ function labelRota(r) {
   if (!isColeta(r)) return "";
   const d = (r.descricao || "Coleta").trim();
   return d || "Coleta";
+}
+function totalEntregasNormais(f) {
+  return f.dias.reduce((s, d) => s + d.rotas.reduce((s2, r) => s2 + (isColeta(r) ? 0 : (r.entregas || 0)), 0), 0);
+}
+function totalColetas(f) {
+  return f.dias.reduce((s, d) => s + d.rotas.reduce((s2, r) => s2 + (isColeta(r) ? (r.entregas || 0) : 0), 0), 0);
 }
 function htmlRotaBox(dataIso, r) {
   if (isColeta(r)) {
@@ -701,9 +710,14 @@ function renderFechamento() {
     }
     html += `<span class="daytotal">${totalDia(dia)}</span></div></div>`;
   });
+  const totEnt = totalEntregasNormais(f);
+  const totCol = totalColetas(f);
+  const totGeral = totalEntregasFechamento(f);
   html += `<div class="summary">
     <div>TOTAL DE ROTAS: <b>${totalRotasFechamento(f)}</b></div>
-    <div>TOTAL DE ENTREGAS: <b>${totalEntregasFechamento(f)}</b></div>
+    <div>ENTREGAS: <b>${totEnt}</b></div>
+    <div>COLETAS: <b>${totCol}</b></div>
+    <div>TOTAL GERAL: <b>${totGeral}</b></div>
     <div style="margin-top:12px"><button class="btn-danger" style="padding:10px 18px;border-radius:8px;border:none;cursor:pointer" onclick="confirmarExcluirFechamento()">Excluir Fechamento</button></div>
   </div>`;
   app.innerHTML = html;
@@ -729,7 +743,7 @@ function abrirModalNovaRota(dataIso) {
       <input type="number" id="inpQtd" min="0" inputmode="numeric" autofocus>
       <label class="chk-row" for="chkColeta">
         <input type="checkbox" id="chkColeta" onchange="toggleDescColeta()">
-        <span>É coleta</span>
+        <span>Coleta</span>
       </label>
       <div class="desc-box hidden" id="boxDescColeta">
         <label>Descrição</label>
@@ -786,7 +800,7 @@ function editarRota(dataIso, rotaId) {
       <input type="number" id="inpQtdEdit" min="0" value="${rota.entregas}">
       <label class="chk-row" for="chkColetaEdit">
         <input type="checkbox" id="chkColetaEdit" ${col ? "checked" : ""} onchange="toggleDescColetaEdit()">
-        <span>É coleta</span>
+        <span>Coleta</span>
       </label>
       <div class="desc-box ${col ? "" : "hidden"}" id="boxDescColetaEdit">
         <label>Descrição</label>
